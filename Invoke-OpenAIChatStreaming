@@ -1,0 +1,133 @@
+function Load-Token {
+    param (
+        [string]$TokenValue = $env:OPENAI_API_KEY  # Defaulting to retrieve from an environment variable
+    )
+
+    if (-not $global:apiToken) {
+        # Check if the token value provided is not empty
+        if (-not $TokenValue) {
+            $TokenValue = Read-Host -Prompt "Please enter your OpenAI API Key"
+            if (-not $TokenValue) {
+                Write-Error "Token was not provided."
+                return
+            }
+        }
+
+        $global:apiToken = $TokenValue
+    }
+}
+
+function Invoke-OpenAIChat {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$UserQuery,
+        [switch]$ResetConversation,
+        [string]$Model = "gpt-4-turbo-preview",
+        [double]$Temperature = 0,
+        [int]$MaxTokens = 1024,
+        [double]$TopP = 1,
+        [double]$FrequencyPenalty = 0,
+        [double]$PresencePenalty = 0
+    )
+
+    # Ensure the token is loaded
+    Load-Token
+
+    # Exit if the token is not set
+    if (-not $global:apiToken) {
+        Write-Error "API token is not set."
+        return
+    }
+
+    # Reset conversation history if the switch is set
+    if ($ResetConversation) {
+        $script:conversationHistory = @()
+    }
+
+    # Keep the conversation history in a script-level variable
+    $script:conversationHistory += @(@{ role = "user"; content = $UserQuery })
+
+    # Define the base URI for OpenAI API
+    $baseUri = "https://api.openai.com/v1/chat/completions"
+
+    # Prepare the headers
+    $headers = @{
+        "Authorization" = "Bearer $global:apiToken"
+        "Content-Type" = "application/json"
+    }
+
+    # Prepare the body of the request
+    $body = @{
+        model = $Model
+        messages = $script:conversationHistory
+        temperature = $Temperature
+        max_tokens = $MaxTokens
+        top_p = $TopP
+        frequency_penalty = $FrequencyPenalty
+        presence_penalty = $PresencePenalty
+        stream = $true
+    } | ConvertTo-Json
+
+    try {
+        # Create an HttpClientHandler
+        Add-Type -AssemblyName System.Net.Http
+        $handler = [System.Net.Http.HttpClientHandler]::new()
+
+        # Create an HttpClient
+        $client = [System.Net.Http.HttpClient]::new($handler)
+        $client.DefaultRequestHeaders.Add("Authorization", $headers["Authorization"])
+
+        # Prepare the request
+        $streamContent = [System.Net.Http.StringContent]::new($body, [System.Text.Encoding]::UTF8, "application/json")
+        $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Post, $baseUri)
+        $request.Content = $streamContent
+
+        # Send the request
+        $response = $client.SendAsync($request, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+
+        if ($response.IsSuccessStatusCode) {
+            # Process the response
+            $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+            $reader = [System.IO.StreamReader]::new($stream)
+            [string]$fullresponse = ""
+
+            while (-not $reader.EndOfStream) {
+                $line = $reader.ReadLine()
+                if (-not [string]::IsNullOrWhiteSpace($line)) {
+                    if ($line -notlike 'data: `[DONE`]') {
+                        $content = ($line -replace "data: ","" | ConvertFrom-Json -ErrorAction SilentlyContinue).choices.delta.content
+                        if ($content) {
+                            $fullresponse += "$content"
+                            Write-Host $content -NoNewline
+                        }
+                    }
+                }
+            }
+
+            $reader.Close()
+        } else {
+            Write-Error "Failed to get a response: $($response.StatusCode)"
+        }
+    } catch {
+        Write-Error "An error occurred: $_"
+    } finally {
+        # Cleanup
+        if ($client) { $client.Dispose() }
+        if ($handler) { $handler.Dispose() }
+        $script:conversationHistory += @(@{ role = "assistant"; content = $fullresponse })
+
+    }
+}
+
+$apikey = "Removed"
+Load-Token $apikey
+
+#examples
+Invoke-OpenAIChat -UserQuery "what is 2+2 and explain why"
+ 
+Invoke-OpenAIChat -ResetConversation -UserQuery "what is 2+2+2+2+2+2" -Model "gpt-3.5-turbo"
+Invoke-OpenAIChat -UserQuery "what if you used 3s instead" -Model "gpt-3.5-turbo"
+Invoke-OpenAIChat -UserQuery "what if you used 4s instead" -Model "gpt-3.5-turbo"
+
+#see current chat history
+$script:conversationHistory
